@@ -1,0 +1,1 @@
+nvidia-docker run -it -v /projects/tacotron/tacotron2/:/workspace -v /projects/tacotron/DATA/:/projects/tacotron/DATA tacotron2 python -m multiproc train.py --output_directory=outdir --log_directory=logdir --hparams=distributed_run=True
