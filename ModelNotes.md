@@ -1,5 +1,6 @@
 # Tacotron Model Notes
 
+Notes for the tacotron2 model provided by Nvidia
 
 
 ## Tacotron
@@ -17,7 +18,6 @@ Layers:
   - Five 1-d convolution with 512 channels and kernel size 5
   - BatchNorm1d
   - Residual addition to decoder output
-
 
 ### Encoder
 Pretty standard network
@@ -73,6 +73,15 @@ The most complicated layer in the model.
 
 ### Postnet
 
+A N (=5) layers convolutional 1d stack. Convolve over the outputted melspectrograms.
+
+- Postnet
+  - Five 1-d convolution with 512 channels and kernel size 5
+  - BatchNorm1d
+  - Residual addition to decoder output
+
+
+## Testing
 
 
 
