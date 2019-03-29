@@ -19,6 +19,8 @@ from loss_function import Tacotron2Loss, TacoGlowLoss
 from logger import Tacotron2Logger
 from hparams import create_hparams
 
+from text import text_to_sequence
+import numpy as np
 
 def batchnorm_to_float(module):
     """Converts batch norm modules to FP32"""
@@ -190,6 +192,11 @@ def validate(
         for i, batch in enumerate(tqdm(val_loader, desc="validation")):
             x, y = model.parse_batch(batch)
             y_pred = model(x)
+
+            sequence = np.array(text_to_sequence("hello how are you doing today", ['english_cleaners']))[None, :]
+            sequence = torch.autograd.Variable(torch.from_numpy(sequence)).cuda().long()
+
+            infer_y_pred = model.inference(sequence.expand(8, -1))
             glow_loss, gate_loss = criterion(y_pred, y)
             loss = glow_loss + gate_loss
             if distributed_run:

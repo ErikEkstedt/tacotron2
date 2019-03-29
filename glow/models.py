@@ -278,12 +278,12 @@ class Glow(nn.Module):
         return thops.split_feature(h, "split")
 
     def forward(
-        self, x=None, condition=None, y_onehot=None, z=None, eps_std=None, reverse=False
+        self, input_=None, condition=None, y_onehot=None, eps_std=None, reverse=False
     ):
-        if not reverse:
-            return self.normal_flow(x, condition, y_onehot)
+        if input_ is not None:
+            return self.normal_flow(input_, condition, y_onehot)
         else:
-            return self.reverse_flow(z, condition, y_onehot, eps_std)
+            return self.reverse_flow(input_, condition, y_onehot, eps_std)
 
     def normal_flow(self, x, condition, y_onehot):
         pixels = thops.pixels(x)

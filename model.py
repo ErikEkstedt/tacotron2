@@ -797,7 +797,7 @@ class GlowDecoder(Decoder):
 
         return None, gate_outputs, alignments
 
-    def decode(self, decoder_input, mel_output):
+    def decode(self, decoder_input, mel_output=None):
         """ Decoder step using stored states, attention and memory
 
         Using Glow as the (melspec) decoder
@@ -847,16 +847,24 @@ class GlowDecoder(Decoder):
         # Decoder
         decoder_input = torch.cat((self.attention_hidden, self.attention_context), -1)
 
-        z, nll, y_logits = self.glow(
-            mel_output.unsqueeze(-1).unsqueeze(-1),
-            decoder_input.unsqueeze(-1).unsqueeze(-1),
-        )
-
+        if mel_output is not None:
+            glow_output, nll, y_logits = self.glow(
+                mel_output.unsqueeze(-1).unsqueeze(-1), 
+                decoder_input.unsqueeze(-1).unsqueeze(-1),
+            )
+            gate_input = torch.cat((decoder_input, mel_output), dim=1)
+        else:
+            glow_output = self.glow(
+                None, 
+                decoder_input.unsqueeze(-1).unsqueeze(-1),
+            ).squeeze(-1).squeeze(-1)
+            gate_input = torch.cat((decoder_input, glow_output), dim=1)
+            nll = None
         #############################################################################
-        gate_input = torch.cat((decoder_input, mel_output), dim=1)
+        
         gate_prediction = self.gate_layer(gate_input)
 
-        return nll, gate_prediction, self.attention_weights
+        return nll, gate_prediction, self.attention_weights, glow_output
 
     def forward(self, memory, decoder_inputs, memory_lengths):
         """ Decoder forward pass for training
@@ -895,7 +903,7 @@ class GlowDecoder(Decoder):
             decoder_input = decoder_inputs[time]
             mel_output = mel_inputs_tbm[time]
 
-            nll, gate_output, attention_weights = self.decode(decoder_input, mel_output)
+            nll, gate_output, attention_weights, _ = self.decode(decoder_input, mel_output)
 
             mel_outputs += [mel_output.squeeze(1)]
             gate_outputs += [gate_output.squeeze()]
@@ -926,7 +934,7 @@ class GlowDecoder(Decoder):
         mel_outputs, gate_outputs, alignments = [], [], []
         while True:
             decoder_input = self.prenet(decoder_input)
-            mel_output, gate_output, alignment = self.decode(decoder_input)
+            _, gate_output, alignment, mel_output = self.decode(decoder_input)
 
             mel_outputs += [mel_output.squeeze(1)]
             gate_outputs += [gate_output]
