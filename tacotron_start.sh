@@ -7,4 +7,4 @@ sudo nvidia-docker run -it \
   tacotron python train.py \
   --output_directory=outdir \
   --log_directory=logdir \
-  --hparams=iters_per_checkpoint=10,batch_size=24 \
+  --hparams=iters_per_checkpoint=10,batch_size=24,train_glow=False \

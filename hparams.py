@@ -43,6 +43,7 @@ def create_hparams(hparams_string=None, verbose=False):
         ################################
         # Model Parameters             #
         ################################
+        train_glow=True,
         n_symbols=len(symbols),
         symbols_embedding_dim=512,
         # Encoder parameters

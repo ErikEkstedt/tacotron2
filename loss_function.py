@@ -36,4 +36,4 @@ class Tacotron2Loss(nn.Module):
             mel_out_postnet, mel_target
         )
         gate_loss = nn.BCEWithLogitsLoss()(gate_out, gate_target)
-        return mel_loss + gate_loss
+        return mel_loss, gate_loss

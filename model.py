@@ -1,4 +1,5 @@
 from math import sqrt
+from tqdm import tqdm
 import torch
 from torch.autograd import Variable
 from torch import nn
@@ -621,6 +622,9 @@ class Tacotron2(nn.Module):
         return outputs
 
 
+# TacoGlow
+
+
 class TacoGlow(nn.Module):
     def __init__(self, hparams):
         super().__init__()
@@ -706,15 +710,18 @@ class TacoGlow(nn.Module):
         return self.parse_output([nll, gate_outputs, alignments], output_lengths)
 
     def inference(self, inputs):
+        self.eval()
         inputs = self.parse_input(inputs)
         embedded_inputs = self.embedding(inputs).transpose(1, 2)
         encoder_outputs = self.encoder.inference(embedded_inputs)
 
         mel_outputs, gate_outputs, alignments = self.decoder.inference(encoder_outputs)
 
-        outputs = self.parse_output(
-            [mel_outputs, gate_outputs, alignments], inference=True
-        )
+        with torch.no_grad():
+            outputs = self.parse_output(
+                [mel_outputs, gate_outputs, alignments], inference=True
+            )
+        self.train()
         return outputs
 
 
@@ -758,7 +765,8 @@ class GlowDecoder(Decoder):
             hparams.n_mel_channels + glow_input_size,
             1,
             bias=True,
-            w_init_gain="gate",  # Initialize these weights to give output closer to 0 by defalut
+            # w_init_gain="gate",  # Initialize these weights to give output closer to 0 by defalut
+            w_init_gain="sigmoid",
         )
 
     def initialize_decoder_states(self, memory, mask):
@@ -891,7 +899,7 @@ class GlowDecoder(Decoder):
 
         batch_size = decoder_input.shape[0]
 
-        if mel_output is None:
+        if mel_output is None:  # Inference
             glow_output = (
                 self.glow(None, decoder_input.unsqueeze(-1).unsqueeze(-1))
                 .squeeze(-1)
@@ -899,7 +907,7 @@ class GlowDecoder(Decoder):
             )
             gate_input = torch.cat((decoder_input, glow_output), dim=1)
             nll = None
-        else:
+        else:  # Training
             glow_output, nll, y_logits = self.glow(
                 mel_output.unsqueeze(-1).unsqueeze(-1),
                 decoder_input.unsqueeze(-1).unsqueeze(-1),
@@ -978,26 +986,26 @@ class GlowDecoder(Decoder):
         self.initialize_decoder_states(memory, mask=None)
 
         mel_outputs, gate_outputs, alignments = [], [], []
-        with torch.no_grad():
-            while True:
-                decoder_input = self.prenet(decoder_input)
-                _, gate_output, alignment, mel_output = self.decode(decoder_input)
+        # while True:
+        for _ in tqdm(range(self.max_decoder_steps)):
+            decoder_input = self.prenet(decoder_input)
+            _, gate_output, alignment, mel_output = self.decode(decoder_input)
 
-                mel_outputs += [mel_output.squeeze(1)]
-                gate_outputs += [gate_output]
-                alignments += [alignment]
+            mel_outputs += [mel_output.squeeze(1)]
+            gate_outputs += [gate_output]
+            alignments += [alignment]
 
-                end_seq_prob = torch.sigmoid(gate_output.data)
-                if (
-                    end_seq_prob > self.gate_threshold
-                    and len(mel_outputs) > self.min_decoder_steps
-                ):
-                    break
-                elif len(mel_outputs) == self.max_decoder_steps:
-                    print("Warning! Reached max decoder steps")
-                    break
+            end_seq_prob = torch.sigmoid(gate_output.data)
+            if (
+                end_seq_prob > self.gate_threshold
+                and len(mel_outputs) > self.min_decoder_steps
+            ):
+                break
+            elif len(mel_outputs) == self.max_decoder_steps:
+                print("Warning! Reached max decoder steps")
+                break
 
-                decoder_input = mel_output
+            decoder_input = mel_output
 
         mel_outputs, gate_outputs, alignments = self.parse_decoder_outputs(
             mel_outputs, gate_outputs, alignments

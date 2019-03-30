@@ -84,12 +84,14 @@ def prepare_dataloaders(hparams):
     return train_loader, valset, collate_fn
 
 
-def prepare_directories_and_logger(output_directory, log_directory, rank):
+def prepare_directories_and_logger(output_directory, log_directory, rank, glow=False):
     if rank == 0:
         if not os.path.isdir(output_directory):
             os.makedirs(output_directory)
             os.chmod(output_directory, 0o775)
-        logger = Tacotron2Logger(os.path.join(output_directory, log_directory))
+        logger = Tacotron2Logger(
+            os.path.join(output_directory, log_directory), glow=glow
+        )
     else:
         logger = None
     return logger
@@ -120,6 +122,20 @@ def load_glow_model(hparams):
 
 
 def warm_start_model(checkpoint_path, model, ignore_layers):
+    assert os.path.isfile(checkpoint_path)
+    print("Warm starting model from checkpoint '{}'".format(checkpoint_path))
+    checkpoint_dict = torch.load(checkpoint_path, map_location="cpu")
+    model_dict = checkpoint_dict["state_dict"]
+    if len(ignore_layers) > 0:
+        model_dict = {k: v for k, v in model_dict.items() if k not in ignore_layers}
+        dummy_dict = model.state_dict()
+        dummy_dict.update(model_dict)
+        model_dict = dummy_dict
+    model.load_state_dict(model_dict)
+    return model
+
+
+def tacotron_transfer_learning(checkpoint_path, model, ignore_layers):
     assert os.path.isfile(checkpoint_path)
     print("Warm starting model from checkpoint '{}'".format(checkpoint_path))
     checkpoint_dict = torch.load(checkpoint_path, map_location="cpu")
@@ -189,15 +205,12 @@ def validate(
             collate_fn=collate_fn,
         )
 
-        # Lets have a validation loss on the val set to see how the loss changes
-        # and then add an inference step after validation
-        # The inference is not built to handle batches
         val_loss = 0.0
         for i, batch in enumerate(tqdm(val_loader, desc="validation")):
             x, y = model.parse_batch(batch)
             y_pred = model(x)
-            glow_loss, gate_loss = criterion(y_pred, y)
-            loss = glow_loss + gate_loss
+            mel_or_glow_loss, gate_loss = criterion(y_pred, y)
+            loss = mel_or_glow_loss + gate_loss
             if distributed_run:
                 reduced_val_loss = reduce_tensor(loss.data, n_gpus).item()
             else:
@@ -209,7 +222,7 @@ def validate(
     if rank == 0:
         print("Validation loss {}: {:9f}  ".format(iteration, reduced_val_loss))
         logger.log_validation(
-            reduced_val_loss, glow_loss, gate_loss, model, y, y_pred, iteration
+            reduced_val_loss, mel_or_glow_loss, gate_loss, model, y, y_pred, iteration
         )
 
 
@@ -240,8 +253,13 @@ def train(
     torch.manual_seed(hparams.seed)
     torch.cuda.manual_seed(hparams.seed)
 
-    # model = load_model(hparams)
-    model = load_glow_model(hparams)
+    if hparams.train_glow:
+        print("-------------- Training TACOGLOW ------------------")
+        model = load_glow_model(hparams)
+    else:
+        print("-------------- Training TACOTRON ------------------")
+        model = load_model(hparams)
+
     learning_rate = hparams.learning_rate
     optimizer = torch.optim.Adam(
         model.parameters(), lr=learning_rate, weight_decay=hparams.weight_decay
@@ -254,10 +272,17 @@ def train(
     if hparams.distributed_run:
         model = apply_gradient_allreduce(model)
 
-    # criterion = Tacotron2Loss()
-    criterion = TacoGlowLoss()
+    if hparams.train_glow:
+        criterion = TacoGlowLoss()
+    else:
+        criterion = Tacotron2Loss()
 
-    logger = prepare_directories_and_logger(output_directory, log_directory, rank)
+    if hparams.train_glow:
+        logger = prepare_directories_and_logger(
+            output_directory, log_directory, rank, glow=True
+        )
+    else:
+        logger = prepare_directories_and_logger(output_directory, log_directory, rank)
 
     train_loader, valset, collate_fn = prepare_dataloaders(hparams)
 
@@ -266,7 +291,12 @@ def train(
     epoch_offset = 0
     if checkpoint_path is not None:
         if warm_start:
-            model = warm_start_model(checkpoint_path, model, hparams.ignore_layers)
+            if hparams.train_glow:
+                model = tacotron_transfer_learning(
+                    checkpoint_path, model, hparams.ignore_layers
+                )
+            else:
+                model = warm_start_model(checkpoint_path, model, hparams.ignore_layers)
         else:
             model, optimizer, _learning_rate, iteration = load_checkpoint(
                 checkpoint_path, model, optimizer
@@ -277,7 +307,7 @@ def train(
             epoch_offset = max(0, int(iteration / len(train_loader)))
 
     model.train()
-    # ================ MAIN TRAINNIG LOOP! ===================
+    # ================ MAIN TRAINING LOOP! ===================
     for epoch in range(epoch_offset, hparams.epochs):
         print("Epoch: {}".format(epoch))
         for i, batch in enumerate(train_loader):
@@ -289,8 +319,12 @@ def train(
             x, y = model.parse_batch(batch)
             y_pred = model(x)
 
-            glow_loss, gate_loss = criterion(y_pred, y)
-            loss = glow_loss + gate_loss
+            if hparams.train_glow:
+                mel_or_glow_loss, gate_loss = criterion(y_pred, y)
+                loss = mel_or_glow_loss + gate_loss
+            else:
+                mel_or_glow_loss, gate_loss = criterion(y_pred, y)
+                loss = mel_or_glow_loss + gate_loss
 
             if hparams.distributed_run:
                 reduced_loss = reduce_tensor(loss.data, n_gpus).item()
@@ -320,31 +354,13 @@ def train(
                 )
                 logger.log_training(
                     reduced_loss,
-                    glow_loss,
+                    mel_or_glow_loss,
                     gate_loss,
                     grad_norm,
                     learning_rate,
                     duration,
                     iteration,
                 )
-
-            # ================ Inference log ===================
-            if not overflow and (iteration % hparams.iters_per_checkpoint == 0):
-                if rank == 0:
-                    text = "hello how are you doing today"
-
-                    sequence = np.array(text_to_sequence(text, ["english_cleaners"]))[
-                        None, :
-                    ]
-                    sequence = (
-                        torch.autograd.Variable(torch.from_numpy(sequence))
-                        .cuda()
-                        .long()
-                    )
-                    infer_y_pred = model.inference(sequence)
-
-                    print(f"Inference step {iteration}")
-                    logger.log_inference(infer_y_pred, iteration)
 
             # ================ Validation log ===================
             if not overflow and (iteration % hparams.iters_per_checkpoint == 0):

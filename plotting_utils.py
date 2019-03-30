@@ -43,19 +43,17 @@ def plot_spectrogram_to_numpy(spectrogram):
     return data
 
 
-def plot_gate_outputs_to_numpy(gate_targets=None, gate_outputs=None, inference=False):
+def plot_gate_outputs_to_numpy(gate_targets, gate_outputs):
     fig, ax = plt.subplots(figsize=(12, 3))
-    if not inference:
-        ax.scatter(
-            range(len(gate_targets)),
-            gate_targets,
-            alpha=0.5,
-            color="green",
-            marker="+",
-            s=1,
-            label="target",
-        )
-
+    ax.scatter(
+        range(len(gate_targets)),
+        gate_targets,
+        alpha=0.5,
+        color="green",
+        marker="+",
+        s=1,
+        label="target",
+    )
     ax.scatter(
         range(len(gate_outputs)),
         gate_outputs,
@@ -77,7 +75,7 @@ def plot_gate_outputs_to_numpy(gate_targets=None, gate_outputs=None, inference=F
 
 
 # --------------------------------------------------------------------------------
-# New without geting rbb values but letting tensorboardx plot the figures directly
+# New without geting rgb values but letting tensorboardx plot the figures directly
 
 
 def get_alignment_fig(alignment, info=None):
