@@ -345,9 +345,6 @@ def train(
 
                     print(f"Inference step {iteration}")
                     logger.log_inference(infer_y_pred, iteration)
-                else:
-
-
 
             # ================ Validation log ===================
             if not overflow and (iteration % hparams.iters_per_checkpoint == 0):
