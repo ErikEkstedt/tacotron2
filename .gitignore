@@ -1,0 +1,4 @@
+__pycache*
+debug_outdir/
+outdir/
+logs/

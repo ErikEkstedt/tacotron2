@@ -657,14 +657,27 @@ class TacoGlow(nn.Module):
         inputs = fp32_to_fp16(inputs) if self.fp16_run else inputs
         return inputs
 
-    def parse_output(self, outputs, output_lengths=None):
+    def parse_output(self, outputs, output_lengths=None, inference=False):
+        """
+        Arguments (inference=False):
+            outputs[0]:         nll
+            outputs[1]:         gate_outputs
+            outputs[2]:         alignments
+
+        Arguments (inference=True):
+            outputs[0]:         mel_outputs
+            outputs[1]:         gate_outputs
+            outputs[2]:         alignments
+        """
+
         if self.mask_padding and output_lengths is not None:
             mask = ~get_mask_from_lengths(output_lengths)
             mask = mask.expand(self.n_mel_channels, mask.size(0), mask.size(1))
             mask = mask.permute(1, 0, 2)
 
-            # outputs[0].data.masked_fill_(mask, 0.0)
-            # outputs[1].data.masked_fill_(mask, 0.0)
+            if inference:
+                outputs[0].data.masked_fill_(mask, 0.0)  # mask mel_outputs
+
             outputs[1].data.masked_fill_(mask[:, 0, :], 1e3)  # gate energies
 
         outputs = fp16_to_fp32(outputs) if self.fp16_run else outputs
@@ -696,15 +709,12 @@ class TacoGlow(nn.Module):
         inputs = self.parse_input(inputs)
         embedded_inputs = self.embedding(inputs).transpose(1, 2)
         encoder_outputs = self.encoder.inference(embedded_inputs)
+
         mel_outputs, gate_outputs, alignments = self.decoder.inference(encoder_outputs)
 
-        mel_outputs_postnet = self.postnet(mel_outputs)
-        mel_outputs_postnet = mel_outputs + mel_outputs_postnet
-
         outputs = self.parse_output(
-            [mel_outputs, mel_outputs_postnet, gate_outputs, alignments]
+            [mel_outputs, gate_outputs, alignments], inference=True
         )
-
         return outputs
 
 
@@ -717,6 +727,7 @@ class GlowDecoder(Decoder):
         self.attention_rnn_dim = hparams.attention_rnn_dim
         self.prenet_dim = hparams.prenet_dim
         self.max_decoder_steps = hparams.max_decoder_steps
+        self.min_decoder_steps = hparams.min_decoder_steps
         self.gate_threshold = hparams.gate_threshold
         self.p_attention_dropout = hparams.p_attention_dropout
         self.p_decoder_dropout = hparams.p_decoder_dropout
@@ -747,7 +758,7 @@ class GlowDecoder(Decoder):
             hparams.n_mel_channels + glow_input_size,
             1,
             bias=True,
-            w_init_gain="sigmoid",
+            w_init_gain="gate",  # Initialize these weights to give output closer to 0 by defalut
         )
 
     def initialize_decoder_states(self, memory, mask):
@@ -785,15 +796,46 @@ class GlowDecoder(Decoder):
         self.processed_memory = self.attention_layer.memory_layer(memory)
         self.mask = mask
 
+    def parse_decoder_outputs_ORIGINAL(self, mel_outputs, gate_outputs, alignments):
+        """ Prepares decoder outputs for output
+        PARAMS
+        ------
+        mel_outputs:
+        gate_outputs: gate output energies
+        alignments:
+
+        RETURNS
+        -------
+        mel_outputs:
+        gate_outpust: gate output energies
+        alignments:
+        """
+        # (T_out, B) -> (B, T_out)
+        alignments = torch.stack(alignments).transpose(0, 1)
+        # (T_out, B) -> (B, T_out)
+        gate_outputs = torch.stack(gate_outputs).transpose(0, 1)
+        gate_outputs = gate_outputs.contiguous()
+        # (T_out, B, n_mel_channels) -> (B, T_out, n_mel_channels)
+        mel_outputs = torch.stack(mel_outputs).transpose(0, 1).contiguous()
+        # decouple frames per step
+        mel_outputs = mel_outputs.view(mel_outputs.size(0), -1, self.n_mel_channels)
+        # (B, T_out, n_mel_channels) -> (B, n_mel_channels, T_out)
+        mel_outputs = mel_outputs.transpose(1, 2)
+
+        return mel_outputs, gate_outputs, alignments
+
     def parse_decoder_outputs(self, gate_outputs, alignments, mel_outputs=None):
-        if mel_outputs is not None:
-            return self.parse_decoder_outputs(gate_outputs, alignments, mel_outputs)
-        else:
+        if mel_outputs is None:
+            # training with glow. No mel outputs given
             # (T_out, B) -> (B, T_out)
             alignments = torch.stack(alignments).transpose(0, 1)
             # (T_out, B) -> (B, T_out)
             gate_outputs = torch.stack(gate_outputs).transpose(0, 1)
             gate_outputs = gate_outputs.contiguous()
+        else:
+            return self.parse_decoder_outputs_ORIGINAL(
+                gate_outputs, alignments, mel_outputs
+            )
 
         return None, gate_outputs, alignments
 
@@ -847,21 +889,23 @@ class GlowDecoder(Decoder):
         # Decoder
         decoder_input = torch.cat((self.attention_hidden, self.attention_context), -1)
 
-        if mel_output is not None:
+        batch_size = decoder_input.shape[0]
+
+        if mel_output is None:
+            glow_output = (
+                self.glow(None, decoder_input.unsqueeze(-1).unsqueeze(-1))
+                .squeeze(-1)
+                .squeeze(-1)
+            )
+            gate_input = torch.cat((decoder_input, glow_output), dim=1)
+            nll = None
+        else:
             glow_output, nll, y_logits = self.glow(
-                mel_output.unsqueeze(-1).unsqueeze(-1), 
+                mel_output.unsqueeze(-1).unsqueeze(-1),
                 decoder_input.unsqueeze(-1).unsqueeze(-1),
             )
             gate_input = torch.cat((decoder_input, mel_output), dim=1)
-        else:
-            glow_output = self.glow(
-                None, 
-                decoder_input.unsqueeze(-1).unsqueeze(-1),
-            ).squeeze(-1).squeeze(-1)
-            gate_input = torch.cat((decoder_input, glow_output), dim=1)
-            nll = None
         #############################################################################
-        
         gate_prediction = self.gate_layer(gate_input)
 
         return nll, gate_prediction, self.attention_weights, glow_output
@@ -903,7 +947,9 @@ class GlowDecoder(Decoder):
             decoder_input = decoder_inputs[time]
             mel_output = mel_inputs_tbm[time]
 
-            nll, gate_output, attention_weights, _ = self.decode(decoder_input, mel_output)
+            nll, gate_output, attention_weights, _ = self.decode(
+                decoder_input, mel_output
+            )
 
             mel_outputs += [mel_output.squeeze(1)]
             gate_outputs += [gate_output.squeeze()]
@@ -932,21 +978,26 @@ class GlowDecoder(Decoder):
         self.initialize_decoder_states(memory, mask=None)
 
         mel_outputs, gate_outputs, alignments = [], [], []
-        while True:
-            decoder_input = self.prenet(decoder_input)
-            _, gate_output, alignment, mel_output = self.decode(decoder_input)
+        with torch.no_grad():
+            while True:
+                decoder_input = self.prenet(decoder_input)
+                _, gate_output, alignment, mel_output = self.decode(decoder_input)
 
-            mel_outputs += [mel_output.squeeze(1)]
-            gate_outputs += [gate_output]
-            alignments += [alignment]
+                mel_outputs += [mel_output.squeeze(1)]
+                gate_outputs += [gate_output]
+                alignments += [alignment]
 
-            if torch.sigmoid(gate_output.data) > self.gate_threshold:
-                break
-            elif len(mel_outputs) == self.max_decoder_steps:
-                print("Warning! Reached max decoder steps")
-                break
+                end_seq_prob = torch.sigmoid(gate_output.data)
+                if (
+                    end_seq_prob > self.gate_threshold
+                    and len(mel_outputs) > self.min_decoder_steps
+                ):
+                    break
+                elif len(mel_outputs) == self.max_decoder_steps:
+                    print("Warning! Reached max decoder steps")
+                    break
 
-            decoder_input = mel_output
+                decoder_input = mel_output
 
         mel_outputs, gate_outputs, alignments = self.parse_decoder_outputs(
             mel_outputs, gate_outputs, alignments

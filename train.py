@@ -22,6 +22,7 @@ from hparams import create_hparams
 from text import text_to_sequence
 import numpy as np
 
+
 def batchnorm_to_float(module):
     """Converts batch norm modules to FP32"""
     if isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
@@ -188,15 +189,13 @@ def validate(
             collate_fn=collate_fn,
         )
 
+        # Lets have a validation loss on the val set to see how the loss changes
+        # and then add an inference step after validation
+        # The inference is not built to handle batches
         val_loss = 0.0
         for i, batch in enumerate(tqdm(val_loader, desc="validation")):
             x, y = model.parse_batch(batch)
             y_pred = model(x)
-
-            sequence = np.array(text_to_sequence("hello how are you doing today", ['english_cleaners']))[None, :]
-            sequence = torch.autograd.Variable(torch.from_numpy(sequence)).cuda().long()
-
-            infer_y_pred = model.inference(sequence.expand(8, -1))
             glow_loss, gate_loss = criterion(y_pred, y)
             loss = glow_loss + gate_loss
             if distributed_run:
@@ -311,6 +310,7 @@ def train(
 
             overflow = optimizer.overflow if hparams.fp16_run else False
 
+            # ================ Training log ===================
             if not overflow and not math.isnan(reduced_loss) and rank == 0:
                 duration = time.perf_counter() - start
                 print(
@@ -328,6 +328,28 @@ def train(
                     iteration,
                 )
 
+            # ================ Inference log ===================
+            if not overflow and (iteration % hparams.iters_per_checkpoint == 0):
+                if rank == 0:
+                    text = "hello how are you doing today"
+
+                    sequence = np.array(text_to_sequence(text, ["english_cleaners"]))[
+                        None, :
+                    ]
+                    sequence = (
+                        torch.autograd.Variable(torch.from_numpy(sequence))
+                        .cuda()
+                        .long()
+                    )
+                    infer_y_pred = model.inference(sequence)
+
+                    print(f"Inference step {iteration}")
+                    logger.log_inference(infer_y_pred, iteration)
+                else:
+
+
+
+            # ================ Validation log ===================
             if not overflow and (iteration % hparams.iters_per_checkpoint == 0):
                 validate(
                     model,

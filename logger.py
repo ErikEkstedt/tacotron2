@@ -1,8 +1,12 @@
 import random
-import torch.nn.functional as F
+import torch
 from tensorboardX import SummaryWriter
-from plotting_utils import plot_alignment_to_numpy, plot_spectrogram_to_numpy
-from plotting_utils import plot_gate_outputs_to_numpy
+from plotting_utils import (
+    plot_alignment_to_numpy,
+    plot_spectrogram_to_numpy,
+    plot_gate_outputs_to_numpy,
+)
+from plotting_utils import get_alignment_fig, get_spectrogram_fig, get_gate_fig
 
 
 class Tacotron2Logger(SummaryWriter):
@@ -41,8 +45,8 @@ class Tacotron2Logger(SummaryWriter):
             self.add_histogram(tag, value.data.cpu().numpy(), iteration)
 
         # plot alignment, mel target and predicted, gate target and predicted
-        idx = random.randint(0, alignments.size(0) - 1)
         if False:
+            idx = random.randint(0, alignments.size(0) - 1)
             self.add_image(
                 "alignment",
                 plot_alignment_to_numpy(alignments[idx].data.cpu().numpy().T),
@@ -62,7 +66,57 @@ class Tacotron2Logger(SummaryWriter):
                 "gate",
                 plot_gate_outputs_to_numpy(
                     gate_targets[idx].data.cpu().numpy(),
-                    F.sigmoid(gate_outputs[idx]).data.cpu().numpy(),
+                    torch.sigmoid(gate_outputs[idx]).data.cpu().numpy(),
                 ),
                 iteration,
             )
+
+    # def log_inference(self, y_pred, iteration):
+    #     mel_outputs, gate_outputs, alignments = y_pred
+
+    #     # plot alignment, mel target and predicted, gate target and predicted
+    #     idx = random.randint(0, alignments.size(0) - 1)
+    #     self.add_image(
+    #         "Inference alignment",
+    #         plot_alignment_to_numpy(alignments.data.cpu().squeeze().numpy().T),
+    #         iteration,
+    #         dataformats="HWC",
+    #     )
+    #     self.add_image(
+    #         "Inference mel_predicted",
+    #         plot_spectrogram_to_numpy(mel_outputs.data.cpu().squeeze().numpy()),
+    #         iteration,
+    #         dataformats="HWC",
+    #     )
+    #     self.add_image(
+    #         "Inference gate",
+    #         plot_gate_outputs_to_numpy(
+    #             torch.sigmoid(gate_outputs).data.cpu().squeeze().numpy()
+    #         ),
+    #         iteration,
+    #         dataformats="HWC",
+    #     )
+
+    def log_inference(self, y_pred, iteration):
+        mel_outputs, gate_outputs, alignments = y_pred
+
+        # plot alignment, mel target and predicted, gate target and predicted
+        idx = random.randint(0, alignments.size(0) - 1)
+        self.add_figure(
+            "Inference alignment",
+            get_alignment_fig(alignments.data.cpu().squeeze().numpy().T),
+            iteration,
+        )
+        self.add_figure(
+            "Inference mel_predicted",
+            get_spectrogram_fig(mel_outputs.data.cpu().squeeze().numpy()),
+            iteration,
+        )
+        self.add_figure(
+            "Inference gate",
+            get_gate_fig(
+                gate_outputs=torch.sigmoid(gate_outputs).data.cpu().squeeze().numpy(),
+                inference=True,
+            ),
+            iteration,
+        )

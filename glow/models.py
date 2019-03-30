@@ -28,7 +28,7 @@ class TacotronNN(nn.Module):
         self.hidden = memory.data.new(memory.size(0), self.hidden_size).zero_()
 
     def forward(self, z, condition):
-        rnn_input = torch.cat((z, condition), dim=1).squeeze()
+        rnn_input = torch.cat((z, condition), dim=1).squeeze(-1).squeeze(-1)
         self.hidden = self.rnn(rnn_input, self.hidden)
         return self.linear(self.hidden).unsqueeze(-1).unsqueeze(-1)
 
@@ -309,9 +309,15 @@ class Glow(nn.Module):
         return z, nll, y_logits
 
     def reverse_flow(self, z, condition, y_onehot, eps_std):
+        # TODO:
+        # prior is always going to be the same for us?
+        # we should just hardcode this to take any values of batch_size
+        mean, logs = self.prior(y_onehot)
+        batch_size = condition.shape[0]
         with torch.no_grad():
-            mean, logs = self.prior(y_onehot)
             if z is None:
+                mean = mean[0].expand((batch_size, *mean.shape[1:]))
+                logs = logs[0].expand((batch_size, *logs.shape[1:]))
                 z = modules.GaussianDiag.sample(mean, logs, eps_std)
             x = self.flow(z, condition, eps_std=eps_std, reverse=True)
         return x
